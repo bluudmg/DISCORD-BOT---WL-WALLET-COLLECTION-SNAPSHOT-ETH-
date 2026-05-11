@@ -1,0 +1,2 @@
+# DISCORD-BOT---WL-WALLET-COLLECTION-SNAPSHOT-ETH-
+Discord Bot that serves the only purpose of collecting ETH addresses to facilitate WL building for NFT projects.
