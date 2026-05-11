@@ -240,9 +240,13 @@ async function handleCreateList(interaction) {
     updatedAt: now
   };
 
+  await saveList(listId, list);
+
   try {
     await sendWalletPanel(targetChannel, list);
   } catch (error) {
+    await deleteList(listId);
+
     if (error.code === 50001 || error.code === 50013) {
       await editReplySafely(
         interaction,
@@ -254,9 +258,10 @@ async function handleCreateList(interaction) {
     throw error;
   }
 
-  await saveList(listId, list);
-
-  await editReplySafely(interaction, `Created **${name}** in ${targetChannel}.\n${formatRules(rules)}`);
+  await editReplySafely(
+    interaction,
+    `Created **${name}** in ${targetChannel}.\nID: \`${listId}\`\n${formatRules(rules)}`
+  );
 }
 
 async function handleUpdateRules(interaction) {
