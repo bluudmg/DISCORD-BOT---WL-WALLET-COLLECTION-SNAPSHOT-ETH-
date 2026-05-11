@@ -50,7 +50,7 @@ user_id,username,address,submitted_at
 
 ### `/wallet-list show`
 
-Shows existing wallet lists and role rules.
+Shows existing wallet lists, list IDs, channels, wallet counts, and role rules. Empty lists show with `0` wallets.
 
 ### `/wallet-list delete`
 
@@ -58,7 +58,7 @@ Deletes an existing wallet list and its saved wallet submissions.
 
 Options:
 
-- `name`: existing list name
+- `name`: existing list name or list ID
 
 Old buttons for the deleted list will stop working.
 

@@ -97,7 +97,7 @@ const walletListCommand = new SlashCommandBuilder()
       .addStringOption((option) =>
         option
           .setName('name')
-          .setDescription('Optional list name to inspect.')
+          .setDescription('Optional list name or ID to inspect.')
           .setRequired(false)
           .setMaxLength(60)
       )
@@ -109,7 +109,7 @@ const walletListCommand = new SlashCommandBuilder()
       .addStringOption((option) =>
         option
           .setName('name')
-          .setDescription('Existing wallet list name.')
+          .setDescription('Existing wallet list name or ID.')
           .setRequired(true)
           .setMaxLength(60)
       )
@@ -150,16 +150,10 @@ client.on('interactionCreate', async (interaction) => {
   } catch (error) {
     console.error(error);
 
-    const message = {
+    await respondSafely(interaction, {
       content: 'Something went wrong while handling that interaction.',
       ephemeral: true
-    };
-
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(message);
-    } else {
-      await interaction.reply(message);
-    }
+    });
   }
 });
 
@@ -192,13 +186,14 @@ async function handleWalletListCommand(interaction) {
 }
 
 async function handleCreateList(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferSafely(interaction);
 
   const name = interaction.options.getString('name', true).trim();
   const [, existingList] = await findListByName(interaction.guildId, name);
 
   if (existingList) {
-    await interaction.editReply(
+    await editReplySafely(
+      interaction,
       `A wallet list named **${name}** already exists. Use \`/wallet-list rules\` to change its role rules.`
     );
     return;
@@ -222,17 +217,17 @@ async function handleCreateList(interaction) {
   await saveList(listId, list);
   await sendWalletPanel(targetChannel, list);
 
-  await interaction.editReply(`Created **${name}** in ${targetChannel}.\n${formatRules(rules)}`);
+  await editReplySafely(interaction, `Created **${name}** in ${targetChannel}.\n${formatRules(rules)}`);
 }
 
 async function handleUpdateRules(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferSafely(interaction);
 
   const name = interaction.options.getString('name', true).trim();
   const [listId, list] = await findListByName(interaction.guildId, name);
 
   if (!list) {
-    await interaction.editReply(`I could not find a wallet list named **${name}**.`);
+    await editReplySafely(interaction, `I could not find a wallet list named **${name}**.`);
     return;
   }
 
@@ -243,18 +238,18 @@ async function handleUpdateRules(interaction) {
     updatedAt: new Date().toISOString()
   });
 
-  await interaction.editReply(`Updated rules for **${list.name}**.\n${formatRules(rules)}`);
+  await editReplySafely(interaction, `Updated rules for **${list.name}**.\n${formatRules(rules)}`);
 }
 
 async function handleExportList(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferSafely(interaction);
 
   const name = interaction.options.getString('name', true).trim();
   const format = interaction.options.getString('format') ?? 'csv';
   const [, list] = await findListByName(interaction.guildId, name);
 
   if (!list) {
-    await interaction.editReply(`I could not find a wallet list named **${name}**.`);
+    await editReplySafely(interaction, `I could not find a wallet list named **${name}**.`);
     return;
   }
 
@@ -265,28 +260,28 @@ async function handleExportList(interaction) {
       ? buildJsonAttachment(rows, `${safeName || 'wallet-list'}.json`)
       : buildCsvAttachment(rows, `${safeName || 'wallet-list'}.csv`);
 
-  await interaction.editReply({
+  await editReplySafely(interaction, {
     content: `Exported **${list.name}** with ${rows.length} wallet${rows.length === 1 ? '' : 's'}.`,
     files: [attachment]
   });
 }
 
 async function handleShowLists(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferSafely(interaction);
 
   const name = interaction.options.getString('name')?.trim();
 
   if (name) {
-    const [, list] = await findListByName(interaction.guildId, name);
+    const [, list] = await findList(interaction.guildId, name);
 
     if (!list) {
-      await interaction.editReply(`I could not find a wallet list named **${name}**.`);
+      await editReplySafely(interaction, `I could not find a wallet list named **${name}**.`);
       return;
     }
 
     const count = flattenWalletEntries(await getWalletEntries(list.id)).length;
 
-    await interaction.editReply({
+    await editReplySafely(interaction, {
       embeds: [
         new EmbedBuilder()
           .setTitle(list.name)
@@ -300,35 +295,36 @@ async function handleShowLists(interaction) {
   const lists = await getGuildLists(interaction.guildId);
 
   if (lists.length === 0) {
-    await interaction.editReply('No wallet lists exist yet. Create one with `/wallet-list create`.');
+    await editReplySafely(interaction, 'No wallet lists exist yet. Create one with `/wallet-list create`.');
     return;
   }
 
-  await interaction.editReply({
+  await editReplySafely(interaction, {
     embeds: [
       new EmbedBuilder()
         .setTitle('Wallet lists')
-        .setDescription(lists.map(([, list]) => `**${list.name}**\n${formatRules(list.rules)}`).join('\n\n'))
+        .setDescription((await Promise.all(lists.map(formatListSummary))).join('\n\n'))
         .setColor(0x2f80ed)
     ]
   });
 }
 
 async function handleDeleteList(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await deferSafely(interaction);
 
   const name = interaction.options.getString('name', true).trim();
-  const [listId, list] = await findListByName(interaction.guildId, name);
+  const [listId, list] = await findList(interaction.guildId, name);
 
   if (!list) {
-    await interaction.editReply(`I could not find a wallet list named **${name}**.`);
+    await editReplySafely(interaction, `I could not find a wallet list named or identified by **${name}**.`);
     return;
   }
 
   await deleteList(listId);
   await deleteWalletEntries(listId);
 
-  await interaction.editReply(
+  await editReplySafely(
+    interaction,
     `Deleted **${list.name}** and its saved wallet submissions. Existing old buttons for this list will no longer work.`
   );
 }
@@ -602,6 +598,19 @@ async function findListByName(guildId, name) {
   );
 }
 
+async function findList(guildId, nameOrId) {
+  const lists = await readJson(listsPath, {});
+  const normalizedInput = normalizeName(nameOrId);
+
+  return (
+    Object.entries(lists).find(
+      ([listId, list]) =>
+        list.guildId === guildId &&
+        (listId === nameOrId || list.id === nameOrId || normalizeName(list.name) === normalizedInput)
+    ) ?? [null, null]
+  );
+}
+
 async function getGuildLists(guildId) {
   const lists = await readJson(listsPath, {});
   return Object.entries(lists).filter(([, list]) => list.guildId === guildId);
@@ -684,6 +693,65 @@ function formatRules(rules) {
         `<@&${rule.roleId}>: ${rule.maxWallets} wallet${rule.maxWallets === 1 ? '' : 's'}`
     )
     .join('\n');
+}
+
+async function deferSafely(interaction) {
+  if (interaction.deferred || interaction.replied) {
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+}
+
+async function editReplySafely(interaction, response) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(response);
+      return;
+    }
+
+    await interaction.reply(normalizeEphemeralResponse(response));
+  } catch (error) {
+    if (error.code !== 10062 && error.code !== 40060) {
+      throw error;
+    }
+  }
+}
+
+async function respondSafely(interaction, response) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(normalizeEphemeralResponse(response));
+      return;
+    }
+
+    await interaction.reply(normalizeEphemeralResponse(response));
+  } catch (error) {
+    if (error.code !== 10062 && error.code !== 40060) {
+      throw error;
+    }
+  }
+}
+
+function normalizeEphemeralResponse(response) {
+  if (typeof response === 'string') {
+    return { content: response, ephemeral: true };
+  }
+
+  return response;
+}
+
+async function formatListSummary([listId, list]) {
+  const count = flattenWalletEntries(await getWalletEntries(list.id)).length;
+  const channel = list.channelId ? `<#${list.channelId}>` : 'unknown channel';
+
+  return [
+    `**${list.name}**`,
+    `ID: \`${listId}\``,
+    `Channel: ${channel}`,
+    `Wallets: ${count}`,
+    formatRules(list.rules)
+  ].join('\n');
 }
 
 async function logWalletSubmission(interaction, list, address, submittedAt, count, maxWallets) {
