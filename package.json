@@ -1,0 +1,19 @@
+{
+  "name": "role-gated-wallet-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for role-gated ETH wallet submissions.",
+  "license": "SEE LICENSE IN LICENSE",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node index.js --deploy-only"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
