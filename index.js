@@ -446,34 +446,6 @@ async function sendWalletPanel(channel, list) {
 
 async function handleWalletButton(interaction) {
   const listId = interaction.customId.split(':')[1];
-  const list = await getList(listId);
-
-  if (!list || list.guildId !== interaction.guildId) {
-    const guildLists = await getGuildLists(interaction.guildId);
-    const knownLists = guildLists.length
-      ? guildLists.map(([id, guildList]) => `${guildList.name} (${id})`).join(', ')
-      : 'none';
-
-    console.warn(
-      `Missing wallet list ${listId} for guild ${interaction.guildId}. Known lists: ${knownLists}`
-    );
-
-    await interaction.reply({
-      content: `This wallet button points to a missing list ID: \`${listId}\`.\nKnown lists in this server: ${knownLists}.\nAsk an admin to delete this old button message and recreate the list after confirming the bot can send messages in this channel.`,
-      ephemeral: true
-    });
-    return;
-  }
-
-  const maxWallets = getMaxWalletsForMember(interaction.member, list.rules);
-
-  if (!maxWallets) {
-    await interaction.reply({
-      content: 'You do not have one of the required roles for this wallet list.',
-      ephemeral: true
-    });
-    return;
-  }
 
   const walletInput = new TextInputBuilder()
     .setCustomId('wallet_address')
@@ -485,8 +457,8 @@ async function handleWalletButton(interaction) {
     .setRequired(true);
 
   const modal = new ModalBuilder()
-    .setCustomId(`wallet_modal:${list.id}`)
-    .setTitle(`${list.name} wallet`)
+    .setCustomId(`wallet_modal:${listId}`)
+    .setTitle('Submit ETH wallet')
     .addComponents(new ActionRowBuilder().addComponents(walletInput));
 
   await interaction.showModal(modal);
@@ -496,9 +468,26 @@ async function handleWalletModal(interaction) {
   const listId = interaction.customId.split(':')[1];
   const list = await getList(listId);
 
-  if (!list || list.guildId !== interaction.guildId) {
+  if (!list) {
+    const guildLists = await getGuildLists(interaction.guildId);
+    const knownLists = guildLists.length
+      ? guildLists.map(([id, guildList]) => `${guildList.name} (${id})`).join(', ')
+      : 'none';
+
+    console.warn(
+      `Missing wallet list ${listId} for guild ${interaction.guildId} after modal submit. Known lists: ${knownLists}`
+    );
+
     await interaction.reply({
-      content: `This wallet list is no longer configured. Missing list ID: \`${listId}\`.`,
+      content: `This wallet list is no longer configured.\nMissing list ID: \`${listId}\`\nKnown lists in this server: ${knownLists}`,
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (list.guildId !== interaction.guildId) {
+    await interaction.reply({
+      content: `This wallet list belongs to another server record.\nSaved server ID: \`${list.guildId}\`\nClicked server ID: \`${interaction.guildId}\``,
       ephemeral: true
     });
     return;
