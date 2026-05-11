@@ -36,6 +36,8 @@ const ethAddressPattern = /^0x[a-fA-F0-9]{40}$/;
 const dataDir = path.resolve('data');
 const listsPath = path.join(dataDir, 'lists.json');
 const walletsPath = path.join(dataDir, 'wallets.json');
+let cachedLists = null;
+let cachedWallets = null;
 
 const walletListCommand = new SlashCommandBuilder()
   .setName('wallet-list')
@@ -452,6 +454,10 @@ async function handleWalletButton(interaction) {
       ? guildLists.map(([id, guildList]) => `${guildList.name} (${id})`).join(', ')
       : 'none';
 
+    console.warn(
+      `Missing wallet list ${listId} for guild ${interaction.guildId}. Known lists: ${knownLists}`
+    );
+
     await interaction.reply({
       content: `This wallet button points to a missing list ID: \`${listId}\`.\nKnown lists in this server: ${knownLists}.\nAsk an admin to delete this old button message and recreate the list after confirming the bot can send messages in this channel.`,
       ephemeral: true
@@ -464,16 +470,6 @@ async function handleWalletButton(interaction) {
   if (!maxWallets) {
     await interaction.reply({
       content: 'You do not have one of the required roles for this wallet list.',
-      ephemeral: true
-    });
-    return;
-  }
-
-  const currentCount = await getUserWalletCount(list.id, interaction.user.id);
-
-  if (currentCount >= maxWallets) {
-    await interaction.reply({
-      content: `You already submitted the maximum of ${maxWallets} wallet${maxWallets === 1 ? '' : 's'} for **${list.name}**.`,
       ephemeral: true
     });
     return;
@@ -670,25 +666,46 @@ async function writeJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function saveList(listId, list) {
-  const lists = await readJson(listsPath, {});
-  lists[listId] = list;
+async function getListsStore() {
+  cachedLists ??= await readJson(listsPath, {});
+  return cachedLists;
+}
+
+async function writeListsStore(lists) {
+  cachedLists = lists;
   await writeJson(listsPath, lists);
+}
+
+async function getWalletsStore() {
+  cachedWallets ??= await readJson(walletsPath, {});
+  return cachedWallets;
+}
+
+async function writeWalletsStore(wallets) {
+  cachedWallets = wallets;
+  await writeJson(walletsPath, wallets);
+}
+
+async function saveList(listId, list) {
+  const lists = await getListsStore();
+  lists[listId] = list;
+  await writeListsStore(lists);
+  console.log(`Saved wallet list ${list.name} (${listId}) for guild ${list.guildId}`);
 }
 
 async function deleteList(listId) {
-  const lists = await readJson(listsPath, {});
+  const lists = await getListsStore();
   delete lists[listId];
-  await writeJson(listsPath, lists);
+  await writeListsStore(lists);
 }
 
 async function getList(listId) {
-  const lists = await readJson(listsPath, {});
+  const lists = await getListsStore();
   return lists[listId] ?? null;
 }
 
 async function findListByName(guildId, name) {
-  const lists = await readJson(listsPath, {});
+  const lists = await getListsStore();
   const normalizedName = normalizeName(name);
 
   return (
@@ -699,7 +716,7 @@ async function findListByName(guildId, name) {
 }
 
 async function findList(guildId, nameOrId) {
-  const lists = await readJson(listsPath, {});
+  const lists = await getListsStore();
   const normalizedInput = normalizeName(nameOrId);
 
   return (
@@ -712,12 +729,12 @@ async function findList(guildId, nameOrId) {
 }
 
 async function getGuildLists(guildId) {
-  const lists = await readJson(listsPath, {});
+  const lists = await getListsStore();
   return Object.entries(lists).filter(([, list]) => list.guildId === guildId);
 }
 
 async function addWalletSubmission(listId, userId, submission, maxWallets) {
-  const wallets = await readJson(walletsPath, {});
+  const wallets = await getWalletsStore();
   wallets[listId] ??= {};
   wallets[listId][userId] ??= [];
 
@@ -732,20 +749,20 @@ async function addWalletSubmission(listId, userId, submission, maxWallets) {
   }
 
   userWallets.push(submission);
-  await writeJson(walletsPath, wallets);
+  await writeWalletsStore(wallets);
 
   return { saved: true, count: userWallets.length };
 }
 
 async function getWalletEntries(listId) {
-  const wallets = await readJson(walletsPath, {});
+  const wallets = await getWalletsStore();
   return wallets[listId] ?? {};
 }
 
 async function deleteWalletEntries(listId) {
-  const wallets = await readJson(walletsPath, {});
+  const wallets = await getWalletsStore();
   delete wallets[listId];
-  await writeJson(walletsPath, wallets);
+  await writeWalletsStore(wallets);
 }
 
 function normalizeName(name) {
