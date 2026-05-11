@@ -104,6 +104,25 @@ const walletListCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName('panel')
+      .setDescription('Post a fresh submission button for an existing wallet list.')
+      .addStringOption((option) =>
+        option
+          .setName('name')
+          .setDescription('Existing wallet list name or ID.')
+          .setRequired(true)
+          .setMaxLength(60)
+      )
+      .addChannelOption((option) =>
+        option
+          .setName('channel')
+          .setDescription('Where to post the fresh wallet submission panel.')
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(false)
+      )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName('delete')
       .setDescription('Delete a wallet list and its saved wallet submissions.')
       .addStringOption((option) =>
@@ -180,13 +199,20 @@ async function handleWalletListCommand(interaction) {
     return;
   }
 
+  if (subcommand === 'panel') {
+    await handlePostPanel(interaction);
+    return;
+  }
+
   if (subcommand === 'delete') {
     await handleDeleteList(interaction);
   }
 }
 
 async function handleCreateList(interaction) {
-  await deferSafely(interaction);
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
 
   const name = interaction.options.getString('name', true).trim();
   const [, existingList] = await findListByName(interaction.guildId, name);
@@ -214,14 +240,29 @@ async function handleCreateList(interaction) {
     updatedAt: now
   };
 
+  try {
+    await sendWalletPanel(targetChannel, list);
+  } catch (error) {
+    if (error.code === 50001 || error.code === 50013) {
+      await editReplySafely(
+        interaction,
+        `I cannot post in ${targetChannel}. Please give the bot permission to View Channel and Send Messages there, then run \`/wallet-list create\` again.`
+      );
+      return;
+    }
+
+    throw error;
+  }
+
   await saveList(listId, list);
-  await sendWalletPanel(targetChannel, list);
 
   await editReplySafely(interaction, `Created **${name}** in ${targetChannel}.\n${formatRules(rules)}`);
 }
 
 async function handleUpdateRules(interaction) {
-  await deferSafely(interaction);
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
 
   const name = interaction.options.getString('name', true).trim();
   const [listId, list] = await findListByName(interaction.guildId, name);
@@ -242,7 +283,9 @@ async function handleUpdateRules(interaction) {
 }
 
 async function handleExportList(interaction) {
-  await deferSafely(interaction);
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
 
   const name = interaction.options.getString('name', true).trim();
   const format = interaction.options.getString('format') ?? 'csv';
@@ -267,7 +310,9 @@ async function handleExportList(interaction) {
 }
 
 async function handleShowLists(interaction) {
-  await deferSafely(interaction);
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
 
   const name = interaction.options.getString('name')?.trim();
 
@@ -310,7 +355,9 @@ async function handleShowLists(interaction) {
 }
 
 async function handleDeleteList(interaction) {
-  await deferSafely(interaction);
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
 
   const name = interaction.options.getString('name', true).trim();
   const [listId, list] = await findList(interaction.guildId, name);
@@ -326,6 +373,49 @@ async function handleDeleteList(interaction) {
   await editReplySafely(
     interaction,
     `Deleted **${list.name}** and its saved wallet submissions. Existing old buttons for this list will no longer work.`
+  );
+}
+
+async function handlePostPanel(interaction) {
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
+
+  const name = interaction.options.getString('name', true).trim();
+  const [listId, list] = await findList(interaction.guildId, name);
+
+  if (!list) {
+    await editReplySafely(interaction, `I could not find a wallet list named or identified by **${name}**.`);
+    return;
+  }
+
+  const targetChannel = interaction.options.getChannel('channel') ?? interaction.channel;
+  const updatedList = {
+    ...list,
+    id: listId,
+    channelId: targetChannel.id,
+    updatedAt: new Date().toISOString()
+  };
+
+  try {
+    await sendWalletPanel(targetChannel, updatedList);
+  } catch (error) {
+    if (error.code === 50001 || error.code === 50013) {
+      await editReplySafely(
+        interaction,
+        `I cannot post in ${targetChannel}. Please give the bot permission to View Channel and Send Messages there, then run \`/wallet-list panel\` again.`
+      );
+      return;
+    }
+
+    throw error;
+  }
+
+  await saveList(listId, updatedList);
+
+  await editReplySafely(
+    interaction,
+    `Posted a fresh button for **${updatedList.name}** in ${targetChannel}. You can delete older button messages if they show "no longer configured."`
   );
 }
 
@@ -352,8 +442,13 @@ async function handleWalletButton(interaction) {
   const list = await getList(listId);
 
   if (!list || list.guildId !== interaction.guildId) {
+    const guildLists = await getGuildLists(interaction.guildId);
+    const knownLists = guildLists.length
+      ? guildLists.map(([id, guildList]) => `${guildList.name} (${id})`).join(', ')
+      : 'none';
+
     await interaction.reply({
-      content: 'This wallet list is no longer configured.',
+      content: `This wallet button points to a missing list ID: \`${listId}\`.\nKnown lists in this server: ${knownLists}.\nAsk an admin to delete this old button message and recreate the list after confirming the bot can send messages in this channel.`,
       ephemeral: true
     });
     return;
@@ -402,7 +497,7 @@ async function handleWalletModal(interaction) {
 
   if (!list || list.guildId !== interaction.guildId) {
     await interaction.reply({
-      content: 'This wallet list is no longer configured.',
+      content: `This wallet list is no longer configured. Missing list ID: \`${listId}\`.`,
       ephemeral: true
     });
     return;
@@ -697,10 +792,20 @@ function formatRules(rules) {
 
 async function deferSafely(interaction) {
   if (interaction.deferred || interaction.replied) {
-    return;
+    return true;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  try {
+    await interaction.deferReply({ ephemeral: true });
+    return true;
+  } catch (error) {
+    if (error.code === 10062 || error.code === 40060) {
+      console.warn('Could not acknowledge interaction before it expired.');
+      return false;
+    }
+
+    throw error;
+  }
 }
 
 async function editReplySafely(interaction, response) {
