@@ -101,6 +101,18 @@ const walletListCommand = new SlashCommandBuilder()
           .setRequired(false)
           .setMaxLength(60)
       )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('delete')
+      .setDescription('Delete a wallet list and its saved wallet submissions.')
+      .addStringOption((option) =>
+        option
+          .setName('name')
+          .setDescription('Existing wallet list name.')
+          .setRequired(true)
+          .setMaxLength(60)
+      )
   );
 
 const client = new Client({
@@ -171,6 +183,11 @@ async function handleWalletListCommand(interaction) {
 
   if (subcommand === 'show') {
     await handleShowLists(interaction);
+    return;
+  }
+
+  if (subcommand === 'delete') {
+    await handleDeleteList(interaction);
   }
 }
 
@@ -295,6 +312,25 @@ async function handleShowLists(interaction) {
         .setColor(0x2f80ed)
     ]
   });
+}
+
+async function handleDeleteList(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const name = interaction.options.getString('name', true).trim();
+  const [listId, list] = await findListByName(interaction.guildId, name);
+
+  if (!list) {
+    await interaction.editReply(`I could not find a wallet list named **${name}**.`);
+    return;
+  }
+
+  await deleteList(listId);
+  await deleteWalletEntries(listId);
+
+  await interaction.editReply(
+    `Deleted **${list.name}** and its saved wallet submissions. Existing old buttons for this list will no longer work.`
+  );
 }
 
 async function sendWalletPanel(channel, list) {
@@ -544,6 +580,12 @@ async function saveList(listId, list) {
   await writeJson(listsPath, lists);
 }
 
+async function deleteList(listId) {
+  const lists = await readJson(listsPath, {});
+  delete lists[listId];
+  await writeJson(listsPath, lists);
+}
+
 async function getList(listId) {
   const lists = await readJson(listsPath, {});
   return lists[listId] ?? null;
@@ -589,6 +631,12 @@ async function addWalletSubmission(listId, userId, submission, maxWallets) {
 async function getWalletEntries(listId) {
   const wallets = await readJson(walletsPath, {});
   return wallets[listId] ?? {};
+}
+
+async function deleteWalletEntries(listId) {
+  const wallets = await readJson(walletsPath, {});
+  delete wallets[listId];
+  await writeJson(walletsPath, wallets);
 }
 
 function normalizeName(name) {
