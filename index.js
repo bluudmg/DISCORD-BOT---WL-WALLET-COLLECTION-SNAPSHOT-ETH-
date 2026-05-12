@@ -459,7 +459,6 @@ async function sendWalletPanel(channel, list) {
 
 async function handleWalletButton(interaction) {
   const listId = interaction.customId.split(':')[1];
-  await recoverListFromButtonMessage(interaction, listId);
 
   const walletInput = new TextInputBuilder()
     .setCustomId('wallet_address')
@@ -1020,17 +1019,23 @@ async function d1Query(sql, params = []) {
     body: JSON.stringify({ sql, params })
   });
 
-  const payload = await response.json().catch(() => null);
+  const rawText = await response.text().catch(() => '');
+  let payload;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    throw new Error(`D1 returned non-JSON (HTTP ${response.status}): ${rawText.slice(0, 200)}`);
+  }
 
   if (!response.ok || payload?.success === false) {
-    const message = payload?.errors?.map((error) => error.message).join('; ') || response.statusText;
-    throw new Error(`Cloudflare D1 query failed: ${message}`);
+    const message = payload?.errors?.map((e) => e.message).join('; ') || response.statusText;
+    throw new Error(`D1 query failed (HTTP ${response.status}): ${message}`);
   }
 
   const result = Array.isArray(payload?.result) ? payload.result[0] : payload?.result;
 
   if (result?.success === false) {
-    throw new Error(`Cloudflare D1 query failed: ${result.error || 'unknown error'}`);
+    throw new Error(`D1 statement failed: ${result.error || JSON.stringify(result)}`);
   }
 
   return result ?? payload;
