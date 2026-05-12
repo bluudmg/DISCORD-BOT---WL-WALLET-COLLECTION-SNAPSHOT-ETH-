@@ -11,6 +11,7 @@ import {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  MessageFlags,
   ModalBuilder,
   PermissionFlagsBits,
   REST,
@@ -161,7 +162,7 @@ if (AUTO_DEPLOY_COMMANDS === 'true') {
 
 await loadStores();
 
-client.once('ready', () => {
+client.once('clientReady', () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
@@ -185,7 +186,7 @@ client.on('interactionCreate', async (interaction) => {
 
     await respondSafely(interaction, {
       content: 'Something went wrong while handling that interaction.',
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
   }
 });
@@ -512,7 +513,7 @@ async function handleWalletModal(interaction) {
 
     await editReplySafely(interaction, {
       content: `This wallet list is no longer configured.\nMissing list ID: \`${listId}\`\nKnown lists in this server: ${knownLists}`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -520,7 +521,7 @@ async function handleWalletModal(interaction) {
   if (list.guildId !== interaction.guildId) {
     await editReplySafely(interaction, {
       content: `This wallet list belongs to another server record.\nSaved server ID: \`${list.guildId}\`\nClicked server ID: \`${interaction.guildId}\``,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -530,7 +531,7 @@ async function handleWalletModal(interaction) {
   if (!maxWallets) {
     await editReplySafely(interaction, {
       content: 'You do not have one of the required roles for this wallet list.',
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -540,7 +541,7 @@ async function handleWalletModal(interaction) {
   if (!ethAddressPattern.test(address)) {
     await editReplySafely(interaction, {
       content: 'That does not look like a valid ETH address. It must start with `0x` and contain 40 hex characters.',
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -562,7 +563,7 @@ async function handleWalletModal(interaction) {
   if (!result.saved && result.reason === 'duplicate') {
     await editReplySafely(interaction, {
       content: `That wallet is already saved for **${list.name}**.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -570,7 +571,7 @@ async function handleWalletModal(interaction) {
   if (!result.saved && result.reason === 'limit') {
     await editReplySafely(interaction, {
       content: `You already submitted the maximum of ${maxWallets} wallet${maxWallets === 1 ? '' : 's'} for **${list.name}**.`,
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
     return;
   }
@@ -579,7 +580,7 @@ async function handleWalletModal(interaction) {
 
   await editReplySafely(interaction, {
     content: `Wallet saved for **${list.name}**. You have submitted ${result.count}/${maxWallets}.`,
-    ephemeral: true
+    flags: MessageFlags.Ephemeral
   });
 }
 
@@ -1268,7 +1269,7 @@ async function deferSafely(interaction) {
   }
 
   try {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     return true;
   } catch (error) {
     if (error.code === 10062 || error.code === 40060) {
@@ -1312,7 +1313,7 @@ async function respondSafely(interaction, response) {
 
 function normalizeEphemeralResponse(response) {
   if (typeof response === 'string') {
-    return { content: response, ephemeral: true };
+    return { content: response, flags: MessageFlags.Ephemeral };
   }
 
   return response;
