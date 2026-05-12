@@ -22,10 +22,15 @@ import {
 
 const {
   AUTO_DEPLOY_COMMANDS,
+  CLOUDFLARE_ACCOUNT_ID,
+  CLOUDFLARE_API_TOKEN,
+  CLOUDFLARE_D1_DATABASE_ID,
   DISCORD_CLIENT_ID,
   DISCORD_GUILD_ID,
   DISCORD_TOKEN,
-  LOG_CHANNEL_ID
+  D1_IMPORT_JSON_ON_START,
+  LOG_CHANNEL_ID,
+  STORAGE_DRIVER
 } = process.env;
 
 if (!DISCORD_TOKEN) {
@@ -36,6 +41,11 @@ const ethAddressPattern = /^0x[a-fA-F0-9]{40}$/;
 const dataDir = path.resolve('data');
 const listsPath = path.join(dataDir, 'lists.json');
 const walletsPath = path.join(dataDir, 'wallets.json');
+const storageDriver =
+  STORAGE_DRIVER === 'd1' ||
+  (CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_D1_DATABASE_ID && CLOUDFLARE_API_TOKEN)
+    ? 'd1'
+    : 'json';
 let cachedLists = null;
 let cachedWallets = null;
 
@@ -148,6 +158,8 @@ if (process.argv.includes('--deploy-only')) {
 if (AUTO_DEPLOY_COMMANDS === 'true') {
   await registerSlashCommands();
 }
+
+await loadStores();
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -446,6 +458,7 @@ async function sendWalletPanel(channel, list) {
 
 async function handleWalletButton(interaction) {
   const listId = interaction.customId.split(':')[1];
+  await recoverListFromButtonMessage(interaction, listId);
 
   const walletInput = new TextInputBuilder()
     .setCustomId('wallet_address')
@@ -461,11 +474,30 @@ async function handleWalletButton(interaction) {
     .setTitle('Submit ETH wallet')
     .addComponents(new ActionRowBuilder().addComponents(walletInput));
 
-  await interaction.showModal(modal);
+  try {
+    await interaction.showModal(modal);
+  } catch (error) {
+    if (error.code === 10062) {
+      console.warn('Could not open wallet modal before the button interaction expired.');
+      return;
+    }
+
+    if (error.code === 40060) {
+      console.warn('Wallet button interaction was already acknowledged.');
+      return;
+    }
+
+    throw error;
+  }
 }
 
 async function handleWalletModal(interaction) {
   const listId = interaction.customId.split(':')[1];
+
+  if (!(await deferSafely(interaction))) {
+    return;
+  }
+
   const list = await getList(listId);
 
   if (!list) {
@@ -478,7 +510,7 @@ async function handleWalletModal(interaction) {
       `Missing wallet list ${listId} for guild ${interaction.guildId} after modal submit. Known lists: ${knownLists}`
     );
 
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: `This wallet list is no longer configured.\nMissing list ID: \`${listId}\`\nKnown lists in this server: ${knownLists}`,
       ephemeral: true
     });
@@ -486,7 +518,7 @@ async function handleWalletModal(interaction) {
   }
 
   if (list.guildId !== interaction.guildId) {
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: `This wallet list belongs to another server record.\nSaved server ID: \`${list.guildId}\`\nClicked server ID: \`${interaction.guildId}\``,
       ephemeral: true
     });
@@ -496,7 +528,7 @@ async function handleWalletModal(interaction) {
   const maxWallets = getMaxWalletsForMember(interaction.member, list.rules);
 
   if (!maxWallets) {
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: 'You do not have one of the required roles for this wallet list.',
       ephemeral: true
     });
@@ -506,7 +538,7 @@ async function handleWalletModal(interaction) {
   const address = interaction.fields.getTextInputValue('wallet_address').trim();
 
   if (!ethAddressPattern.test(address)) {
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: 'That does not look like a valid ETH address. It must start with `0x` and contain 40 hex characters.',
       ephemeral: true
     });
@@ -528,7 +560,7 @@ async function handleWalletModal(interaction) {
   );
 
   if (!result.saved && result.reason === 'duplicate') {
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: `That wallet is already saved for **${list.name}**.`,
       ephemeral: true
     });
@@ -536,7 +568,7 @@ async function handleWalletModal(interaction) {
   }
 
   if (!result.saved && result.reason === 'limit') {
-    await interaction.reply({
+    await editReplySafely(interaction, {
       content: `You already submitted the maximum of ${maxWallets} wallet${maxWallets === 1 ? '' : 's'} for **${list.name}**.`,
       ephemeral: true
     });
@@ -545,7 +577,7 @@ async function handleWalletModal(interaction) {
 
   await logWalletSubmission(interaction, list, address, submittedAt, result.count, maxWallets);
 
-  await interaction.reply({
+  await editReplySafely(interaction, {
     content: `Wallet saved for **${list.name}**. You have submitted ${result.count}/${maxWallets}.`,
     ephemeral: true
   });
@@ -638,6 +670,25 @@ async function ensureDataDir() {
   await mkdir(dataDir, { recursive: true });
 }
 
+async function loadStores() {
+  if (storageDriver === 'd1') {
+    await ensureD1Schema();
+    if (D1_IMPORT_JSON_ON_START === 'true') {
+      await importLocalJsonToD1();
+    }
+    const lists = await getGuildLists(DISCORD_GUILD_ID);
+    console.log(`Storage: Cloudflare D1. Loaded ${lists.length} wallet list(s) for this guild.`);
+    return;
+  }
+
+  await ensureDataDir();
+  cachedLists = await readJson(listsPath, {});
+  cachedWallets = await readJson(walletsPath, {});
+  console.log(
+    `Storage: local JSON. Data directory: ${dataDir}. Loaded ${Object.keys(cachedLists).length} wallet list(s).`
+  );
+}
+
 async function readJson(filePath, fallback) {
   try {
     const contents = await readFile(filePath, 'utf8');
@@ -656,26 +707,109 @@ async function writeJson(filePath, value) {
 }
 
 async function getListsStore() {
+  if (storageDriver === 'd1') {
+    cachedLists = await getAllD1Lists();
+    return cachedLists;
+  }
+
   cachedLists ??= await readJson(listsPath, {});
   return cachedLists;
 }
 
 async function writeListsStore(lists) {
+  if (storageDriver === 'd1') {
+    cachedLists = lists;
+    await Promise.all(Object.entries(lists).map(([listId, list]) => upsertD1List(listId, list)));
+    return;
+  }
+
   cachedLists = lists;
   await writeJson(listsPath, lists);
 }
 
 async function getWalletsStore() {
+  if (storageDriver === 'd1') {
+    return {};
+  }
+
   cachedWallets ??= await readJson(walletsPath, {});
   return cachedWallets;
 }
 
 async function writeWalletsStore(wallets) {
+  if (storageDriver === 'd1') {
+    cachedWallets = wallets;
+    return;
+  }
+
   cachedWallets = wallets;
   await writeJson(walletsPath, wallets);
 }
 
+async function recoverListFromButtonMessage(interaction, listId) {
+  if (cachedLists?.[listId]) {
+    return cachedLists[listId];
+  }
+
+  const embed = interaction.message?.embeds?.[0];
+  const name = embed?.title?.replace(/\s+wallet submission$/i, '').trim();
+  const allowedRoles = embed?.fields?.find((field) => field.name === 'Allowed roles')?.value;
+
+  if (!name || !allowedRoles) {
+    return null;
+  }
+
+  const rules = [];
+  const rolePattern = /<@&(\d+)>:\s*(\d+)\s*wallet/gi;
+  let match = rolePattern.exec(allowedRoles);
+
+  while (match) {
+    rules.push({
+      roleId: match[1],
+      maxWallets: Number(match[2])
+    });
+    match = rolePattern.exec(allowedRoles);
+  }
+
+  if (rules.length === 0) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const recoveredList = {
+    id: listId,
+    name,
+    guildId: interaction.guildId,
+    channelId: interaction.channelId,
+    rules,
+    createdBy: 'recovered-from-message',
+    createdAt: now,
+    updatedAt: now
+  };
+
+  cachedLists ??= {};
+  cachedLists[listId] = recoveredList;
+
+  try {
+    await writeListsStore(cachedLists);
+  } catch (error) {
+    console.error(`Failed to persist recovered wallet list ${listId}`, error);
+  }
+
+  console.log(`Recovered wallet list ${name} (${listId}) from button message.`);
+
+  return recoveredList;
+}
+
 async function saveList(listId, list) {
+  if (storageDriver === 'd1') {
+    await upsertD1List(listId, list);
+    cachedLists ??= {};
+    cachedLists[listId] = list;
+    console.log(`Saved wallet list ${list.name} (${listId}) for guild ${list.guildId}`);
+    return;
+  }
+
   const lists = await getListsStore();
   lists[listId] = list;
   await writeListsStore(lists);
@@ -683,17 +817,31 @@ async function saveList(listId, list) {
 }
 
 async function deleteList(listId) {
+  if (storageDriver === 'd1') {
+    await d1Query('DELETE FROM wallet_lists WHERE id = ?', [listId]);
+    delete cachedLists?.[listId];
+    return;
+  }
+
   const lists = await getListsStore();
   delete lists[listId];
   await writeListsStore(lists);
 }
 
 async function getList(listId) {
+  if (storageDriver === 'd1') {
+    return getD1List(listId);
+  }
+
   const lists = await getListsStore();
   return lists[listId] ?? null;
 }
 
 async function findListByName(guildId, name) {
+  if (storageDriver === 'd1') {
+    return findD1ListByName(guildId, name);
+  }
+
   const lists = await getListsStore();
   const normalizedName = normalizeName(name);
 
@@ -705,6 +853,10 @@ async function findListByName(guildId, name) {
 }
 
 async function findList(guildId, nameOrId) {
+  if (storageDriver === 'd1') {
+    return findD1List(guildId, nameOrId);
+  }
+
   const lists = await getListsStore();
   const normalizedInput = normalizeName(nameOrId);
 
@@ -718,11 +870,19 @@ async function findList(guildId, nameOrId) {
 }
 
 async function getGuildLists(guildId) {
+  if (storageDriver === 'd1') {
+    return getD1GuildLists(guildId);
+  }
+
   const lists = await getListsStore();
   return Object.entries(lists).filter(([, list]) => list.guildId === guildId);
 }
 
 async function addWalletSubmission(listId, userId, submission, maxWallets) {
+  if (storageDriver === 'd1') {
+    return addD1WalletSubmission(listId, userId, submission, maxWallets);
+  }
+
   const wallets = await getWalletsStore();
   wallets[listId] ??= {};
   wallets[listId][userId] ??= [];
@@ -744,14 +904,315 @@ async function addWalletSubmission(listId, userId, submission, maxWallets) {
 }
 
 async function getWalletEntries(listId) {
+  if (storageDriver === 'd1') {
+    return getD1WalletEntries(listId);
+  }
+
   const wallets = await getWalletsStore();
   return wallets[listId] ?? {};
 }
 
 async function deleteWalletEntries(listId) {
+  if (storageDriver === 'd1') {
+    await d1Query('DELETE FROM wallet_submissions WHERE list_id = ?', [listId]);
+    return;
+  }
+
   const wallets = await getWalletsStore();
   delete wallets[listId];
   await writeWalletsStore(wallets);
+}
+
+async function ensureD1Schema() {
+  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_D1_DATABASE_ID || !CLOUDFLARE_API_TOKEN) {
+    throw new Error(
+      'D1 storage requires CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_D1_DATABASE_ID, and CLOUDFLARE_API_TOKEN.'
+    );
+  }
+
+  await d1Query(`
+    CREATE TABLE IF NOT EXISTS wallet_lists (
+      id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      rules_json TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (guild_id, normalized_name)
+    )
+  `);
+
+  await d1Query(`
+    CREATE TABLE IF NOT EXISTS wallet_submissions (
+      id TEXT PRIMARY KEY,
+      list_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      address TEXT NOT NULL,
+      address_lower TEXT NOT NULL,
+      username TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      submitted_at TEXT NOT NULL,
+      UNIQUE (list_id, user_id, address_lower),
+      FOREIGN KEY (list_id) REFERENCES wallet_lists(id) ON DELETE CASCADE
+    )
+  `);
+
+  await d1Query('CREATE INDEX IF NOT EXISTS idx_wallet_lists_guild ON wallet_lists (guild_id)');
+  await d1Query(
+    'CREATE INDEX IF NOT EXISTS idx_wallet_submissions_list_user ON wallet_submissions (list_id, user_id)'
+  );
+}
+
+async function importLocalJsonToD1() {
+  const lists = await readJson(listsPath, {});
+  const wallets = await readJson(walletsPath, {});
+
+  for (const [listId, list] of Object.entries(lists)) {
+    await upsertD1List(listId, list);
+  }
+
+  for (const [listId, entriesByUser] of Object.entries(wallets)) {
+    for (const [userId, submissions] of Object.entries(entriesByUser)) {
+      for (const submission of submissions) {
+        await d1Query(
+          `
+            INSERT OR IGNORE INTO wallet_submissions (
+              id, list_id, user_id, address, address_lower, username, guild_id, submitted_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          [
+            randomUUID(),
+            listId,
+            userId,
+            submission.address,
+            submission.address.toLowerCase(),
+            submission.username,
+            submission.guildId,
+            submission.submittedAt
+          ]
+        );
+      }
+    }
+  }
+
+  const walletCount = Object.values(wallets).reduce(
+    (total, entriesByUser) =>
+      total + Object.values(entriesByUser).reduce((userTotal, submissions) => userTotal + submissions.length, 0),
+    0
+  );
+
+  console.log(`Imported local JSON into D1: ${Object.keys(lists).length} list(s), ${walletCount} wallet(s).`);
+}
+
+async function d1Query(sql, params = []) {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${CLOUDFLARE_D1_DATABASE_ID}/query`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${CLOUDFLARE_API_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ sql, params })
+  });
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok || payload?.success === false) {
+    const message = payload?.errors?.map((error) => error.message).join('; ') || response.statusText;
+    throw new Error(`Cloudflare D1 query failed: ${message}`);
+  }
+
+  const result = Array.isArray(payload?.result) ? payload.result[0] : payload?.result;
+
+  if (result?.success === false) {
+    throw new Error(`Cloudflare D1 query failed: ${result.error || 'unknown error'}`);
+  }
+
+  return result ?? payload;
+}
+
+function d1Rows(result) {
+  return result?.results ?? [];
+}
+
+function d1Changes(result) {
+  return Number(result?.meta?.changes ?? 0);
+}
+
+async function getAllD1Lists() {
+  const result = await d1Query('SELECT * FROM wallet_lists ORDER BY created_at ASC');
+  return Object.fromEntries(d1Rows(result).map((row) => [row.id, d1RowToList(row)]));
+}
+
+async function upsertD1List(listId, list) {
+  await d1Query(
+    `
+      INSERT INTO wallet_lists (
+        id, guild_id, name, normalized_name, channel_id, rules_json, created_by, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        name = excluded.name,
+        normalized_name = excluded.normalized_name,
+        channel_id = excluded.channel_id,
+        rules_json = excluded.rules_json,
+        created_by = excluded.created_by,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `,
+    [
+      listId,
+      list.guildId,
+      list.name,
+      normalizeName(list.name),
+      list.channelId,
+      JSON.stringify(list.rules),
+      list.createdBy,
+      list.createdAt,
+      list.updatedAt
+    ]
+  );
+}
+
+async function getD1List(listId) {
+  const result = await d1Query('SELECT * FROM wallet_lists WHERE id = ?', [listId]);
+  const row = d1Rows(result)[0];
+  return row ? d1RowToList(row) : null;
+}
+
+async function findD1ListByName(guildId, name) {
+  const result = await d1Query(
+    'SELECT * FROM wallet_lists WHERE guild_id = ? AND normalized_name = ? LIMIT 1',
+    [guildId, normalizeName(name)]
+  );
+  const row = d1Rows(result)[0];
+  return row ? [row.id, d1RowToList(row)] : [null, null];
+}
+
+async function findD1List(guildId, nameOrId) {
+  const result = await d1Query(
+    `
+      SELECT * FROM wallet_lists
+      WHERE guild_id = ?
+        AND (id = ? OR normalized_name = ?)
+      LIMIT 1
+    `,
+    [guildId, nameOrId, normalizeName(nameOrId)]
+  );
+  const row = d1Rows(result)[0];
+  return row ? [row.id, d1RowToList(row)] : [null, null];
+}
+
+async function getD1GuildLists(guildId) {
+  const result = await d1Query(
+    'SELECT * FROM wallet_lists WHERE guild_id = ? ORDER BY created_at ASC',
+    [guildId]
+  );
+  return d1Rows(result).map((row) => [row.id, d1RowToList(row)]);
+}
+
+async function addD1WalletSubmission(listId, userId, submission, maxWallets) {
+  const addressLower = submission.address.toLowerCase();
+  const insertResult = await d1Query(
+    `
+      INSERT INTO wallet_submissions (
+        id, list_id, user_id, address, address_lower, username, guild_id, submitted_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE (SELECT COUNT(*) FROM wallet_submissions WHERE list_id = ? AND user_id = ?) < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM wallet_submissions
+          WHERE list_id = ? AND user_id = ? AND address_lower = ?
+        )
+    `,
+    [
+      randomUUID(),
+      listId,
+      userId,
+      submission.address,
+      addressLower,
+      submission.username,
+      submission.guildId,
+      submission.submittedAt,
+      listId,
+      userId,
+      maxWallets,
+      listId,
+      userId,
+      addressLower
+    ]
+  );
+
+  const count = await getD1UserWalletCount(listId, userId);
+
+  if (d1Changes(insertResult) > 0) {
+    return { saved: true, count };
+  }
+
+  const duplicate = await d1WalletAddressExists(listId, userId, addressLower);
+  return { saved: false, reason: duplicate ? 'duplicate' : 'limit', count };
+}
+
+async function getD1UserWalletCount(listId, userId) {
+  const result = await d1Query(
+    'SELECT COUNT(*) AS count FROM wallet_submissions WHERE list_id = ? AND user_id = ?',
+    [listId, userId]
+  );
+  return Number(d1Rows(result)[0]?.count ?? 0);
+}
+
+async function d1WalletAddressExists(listId, userId, addressLower) {
+  const result = await d1Query(
+    `
+      SELECT 1 AS found FROM wallet_submissions
+      WHERE list_id = ? AND user_id = ? AND address_lower = ?
+      LIMIT 1
+    `,
+    [listId, userId, addressLower]
+  );
+  return d1Rows(result).length > 0;
+}
+
+async function getD1WalletEntries(listId) {
+  const result = await d1Query(
+    `
+      SELECT user_id, address, username, guild_id, submitted_at
+      FROM wallet_submissions
+      WHERE list_id = ?
+      ORDER BY submitted_at ASC
+    `,
+    [listId]
+  );
+
+  return d1Rows(result).reduce((entries, row) => {
+    entries[row.user_id] ??= [];
+    entries[row.user_id].push({
+      address: row.address,
+      username: row.username,
+      userId: row.user_id,
+      guildId: row.guild_id,
+      submittedAt: row.submitted_at
+    });
+    return entries;
+  }, {});
+}
+
+function d1RowToList(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    rules: JSON.parse(row.rules_json),
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }
 
 function normalizeName(name) {
